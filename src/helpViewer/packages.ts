@@ -3,6 +3,7 @@ import * as cheerio from 'cheerio';
 import * as https from 'https';
 import * as http from 'http';
 import * as vscode from 'vscode';
+import fetch from 'node-fetch';
 
 import { RHelp } from '.';
 import { getRpath, getConfirmation, executeAsTask, doWithProgress, getCranUrl } from '../util';
@@ -260,19 +261,16 @@ export class PackageManager {
         let packages: Package[]|undefined;
         this.pullFavoriteNames();
         if(fromCran){
-            const cranPath = 'web/packages/available_packages_by_date.html';
-            try{
-                this.cranUrl ||= await getCranUrl(cranPath, this.cwd);
-                packages = await this.getParsedCranFile(this.cranUrl);
-            } catch(e){
-                packages = undefined;
-            }
-            if(!packages || packages.length === 0){
-                void vscode.window.showErrorMessage(`Failed to parse CRAN file from ${this.cranUrl || cranPath}`);
-            }
+            // const cranPath = 'web/packages/available_packages_by_date.html';
+            // this.cranUrl ||= await getCranUrl(cranPath, this.cwd);
+            // packages = await this.getParsedCranFile(this.cranUrl);
+            
+            const cranPath2 = 'stats/descriptions';
+            const cranUrl2 = await getCranUrl(cranPath2, this.cwd);
+            packages = await this.getParsedCranFile(cranUrl2);
         } else{
             packages = await this.getParsedIndexFile(`/doc/html/packages.html`);
-            if(!packages || packages.length === 0){
+            if(!packages?.length){
                 void vscode.window.showErrorMessage('Help provider not available!');
             }
         }
@@ -478,7 +476,7 @@ export class PackageManager {
                 indexItems = null;
 			} else{
 				// parse and cache file
-				indexItems = this.parseIndexFile(helpFile.html);
+				indexItems = parseIndexFile(helpFile.html);
 			}
             void this.updateCachedIndexFile(path, indexItems);
 		}
@@ -492,44 +490,6 @@ export class PackageManager {
 		return ret;
 	}
 
-	private parseIndexFile(html: string): IndexFileEntry[] {
-
-		const $ = cheerio.load(html);
-
-		const tables = $('table');
-
-		const ret: IndexFileEntry[] = [];
-
-		// loop over all tables on document and each row as one index entry
-		// assumes that the provided html is from a valid index file
-		tables.each((tableIndex, table) => {
-			const rows = $('tr', table);
-			rows.each((rowIndex, row) => {
-				const elements = $('td', row);
-				if(elements.length === 2){
-                    const e0 = elements[0];
-                    const e1 = elements[1];
-                    if(
-                        e0.type === 'tag' && e1.type === 'tag' &&
-                        e0.firstChild.type === 'tag'
-                    ){
-                        const href = e0.firstChild.attribs['href'];
-                        const name = e0.firstChild.firstChild.data || '';
-                        const description = e1.firstChild.data || '';
-                        ret.push({
-                            name: name,
-                            description: description,
-                            href: href,
-                        });
-                    }
-				}
-			});
-		});
-
-		const retSorted = ret.sort((a, b) => a.name.localeCompare(b.name));
-
-		return retSorted;
-	}
 
     // retrieves and parses a list of packages from CRAN
 	public async getParsedCranFile(url: string): Promise<Package[]> {
@@ -539,79 +499,121 @@ export class PackageManager {
         if(cacheEntry){
             return cacheEntry;
         }
-
+        
         // retrieve html from website
-		const htmlPromise = new Promise<string>((resolve) => {
-			let content = '';
-            const httpOrHttps = (vscode.Uri.parse(url).scheme === 'https' ? https : http);
-			httpOrHttps.get(url, (res: http.IncomingMessage) => {
-				res.on('data', (chunk: Buffer) => {
-					content += chunk.toString();
-				});
-				res.on('close', () => {
-					resolve(content);
-				});
-				res.on('error', () => {
-					resolve('');
-				});
-			});
-		});
-		const html = await htmlPromise;
-
+        let html = '';
+        try {
+            process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+            const res = await fetch(url);
+            html = await (res).text();
+        } catch (error) {
+            void vscode.window.showErrorMessage(`Failed to fetch Cran file from ${url}`);
+            return [];
+        }
+       
         // parse file
-		const cranPackages = this.parseCranFile(html, url);
+        let cranPackages: Package[] = [];
+        try {
+            cranPackages = parseCranFile(html, url);
+        } catch (error) {
+            void vscode.window.showErrorMessage(`Failed to parse Cran file from ${url}`);
+            return [];
+        }
 
         // update cache and return
         void this.updateCachedIndexFile(url, cranPackages);
         const ret = [...cranPackages];
 		return ret;
 	}
-
-	private parseCranFile(html: string, baseUrl: string): CranPackage[] {
-		if(!html){
-			return [];
-		}
-		const $ = cheerio.load(html);
-		const tables = $('table');
-		const ret: CranPackage[] = [];
-
-		// loop over all tables on document and each row as one index entry
-		// assumes that the provided html is from a valid index file
-		tables.each((tableIndex, table) => {
-			const rows = $('tr', table);
-			rows.each((rowIndex, row) => {
-				const elements = $('td', row);
-				if(elements.length === 3){
-
-                    const e0 = elements[0];
-                    const e1 = elements[1];
-                    const e2 = elements[2];
-                    if(
-                        e0.type === 'tag' && e1.type === 'tag' &&
-                        e0.firstChild.type === 'text' && e1.children[1].type === 'tag' &&
-                        e2.type === 'tag'
-                    ){
-                        const href = e1.children[1].attribs['href'];
-                        const url = new URL(href, baseUrl).toString();
-                        ret.push({
-                            date: (e0.firstChild.data || '').trim(),
-                            name: (e1.children[1].firstChild.data || '').trim(),
-                            href: url,
-                            description: (e2.firstChild.data || '').trim(),
-                            isCran: true
-                        });
-                    }
-				}
-			});
-		});
-
-		const retSorted = ret.sort((a, b) => a.name.localeCompare(b.name));
-
-		return retSorted;
-	}
-
 }
 
+
+function parseIndexFile(html: string): IndexFileEntry[] {
+
+    const $ = cheerio.load(html);
+
+    const tables = $('table');
+
+    const ret: IndexFileEntry[] = [];
+
+    // loop over all tables on document and each row as one index entry
+    // assumes that the provided html is from a valid index file
+    tables.each((tableIndex, table) => {
+        const rows = $('tr', table);
+        rows.each((rowIndex, row) => {
+            const elements = $('td', row);
+            if(elements.length === 2){
+                const e0 = elements[0];
+                const e1 = elements[1];
+                if(
+                    e0.type === 'tag' && e1.type === 'tag' &&
+                    e0.firstChild.type === 'tag'
+                ){
+                    const href = e0.firstChild.attribs['href'];
+                    const name = e0.firstChild.firstChild.data || '';
+                    const description = e1.firstChild.data || '';
+                    ret.push({
+                        name: name,
+                        description: description,
+                        href: href,
+                    });
+                }
+            }
+        });
+    });
+
+    const retSorted = ret.sort((a, b) => a.name.localeCompare(b.name));
+
+    return retSorted;
+}
+
+
+function parseCranFile(html: string, baseUrl: string): CranPackage[] {
+    return parseCranTable(html, baseUrl);
+}
+
+function parseCranTable(html: string, baseUrl: string): CranPackage[] {
+    if(!html){
+        return [];
+    }
+    const $ = cheerio.load(html);
+    const tables = $('table');
+    const ret: CranPackage[] = [];
+
+    // loop over all tables on document and each row as one index entry
+    // assumes that the provided html is from a valid index file
+    tables.each((tableIndex, table) => {
+        const rows = $('tr', table);
+        rows.each((rowIndex, row) => {
+            const elements = $('td', row);
+            if(elements.length === 3){
+
+                const e0 = elements[0];
+                const e1 = elements[1];
+                const e2 = elements[2];
+                if(
+                    e0.type === 'tag' && e1.type === 'tag' &&
+                    e0.firstChild.type === 'text' && e1.children[1].type === 'tag' &&
+                    e2.type === 'tag'
+                ){
+                    const href = e1.children[1].attribs['href'];
+                    const url = new URL(href, baseUrl).toString();
+                    ret.push({
+                        date: (e0.firstChild.data || '').trim(),
+                        name: (e1.children[1].firstChild.data || '').trim(),
+                        href: url,
+                        description: (e2.firstChild.data || '').trim(),
+                        isCran: true
+                    });
+                }
+            }
+        });
+    });
+
+    const retSorted = ret.sort((a, b) => a.name.localeCompare(b.name));
+
+    return retSorted;
+}
 
 
 
